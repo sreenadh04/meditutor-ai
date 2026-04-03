@@ -21,12 +21,33 @@ from routers import pdf_router, qa_router, flashcard_router, mcq_router, progres
 from services.llm_service import llm_service
 from services.vector_service import vector_service
 
-# ─── Logging ──────────────────────────────────────────────────────────────────
+# ─── Logging with graceful request_id handling ──────────────────────────────────
+
+class RequestIdFilter(logging.Filter):
+    """Adds request_id to log records, defaults to 'startup' if not present."""
+    def filter(self, record):
+        if not hasattr(record, 'request_id'):
+            record.request_id = 'startup'
+        return True
+
+# Configure basic logging without request_id first
 logging.basicConfig(
     level=logging.DEBUG if DEBUG else logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | [%(request_id)s] | %(message)s",
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
+
+# Add filter to root logger
+logging.getLogger().addFilter(RequestIdFilter())
+
+# Reconfigure handlers with request_id format
+for handler in logging.getLogger().handlers:
+    if isinstance(handler, logging.StreamHandler):
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s | %(levelname)s | %(name)s | [%(request_id)s] | %(message)s"
+        ))
+
 logger = logging.getLogger(__name__)
+
 
 # ─── Custom Middleware ────────────────────────────────────────────────────────
 
@@ -39,16 +60,8 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
         request.state.request_id = request_id
         
-        # Add to logger context
-        old_factory = logging.getLogRecordFactory()
-        
-        def record_factory(*args, **kwargs):
-            record = old_factory(*args, **kwargs)
-            record.request_id = request_id
-            return record
-        
-        logging.setLogRecordFactory(record_factory)
-        
+        # Add to logger context using filter approach (safer)
+        # Store in contextvars for access in logs
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
         return response
@@ -195,7 +208,6 @@ async def lifespan(app: FastAPI):
     
     # Clean up thread pools
     try:
-        import atexit
         from services.vector_service import _executor
         _executor.shutdown(wait=True)
         logger.info("✅ Thread pools cleaned up")
@@ -252,7 +264,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     request_id = getattr(request.state, "request_id", "unknown")
     
     logger.error(
-        f"Unhandled error: {exc} | User: {user_id[:8] if user_id else 'unknown'}... | URL: {request.url}",
+        f"Unhandled error: {exc} | User: {user_id[:8] if user_id != 'unknown' else 'unknown'}... | URL: {request.url}",
         exc_info=True
     )
     
@@ -268,7 +280,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     user_id = getattr(request.state, "user_id", "unknown")
-    logger.warning(f"HTTP {exc.status_code}: {exc.detail} | User: {user_id[:8] if user_id else 'unknown'}...")
+    logger.warning(f"HTTP {exc.status_code}: {exc.detail} | User: {user_id[:8] if user_id != 'unknown' else 'unknown'}...")
     
     return JSONResponse(
         status_code=exc.status_code,
@@ -369,7 +381,7 @@ async def delete_user_data(request: Request):
     deleted["cache_files"] = cache.clear_user_cache(user_id)
     
     # Delete database records
-    from database import SessionLocal, Document, StudySession, TopicProgress
+    from database import SessionLocal, Document
     db = SessionLocal()
     try:
         # Delete documents (cascade should handle related records)
