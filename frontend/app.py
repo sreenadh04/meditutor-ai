@@ -1,10 +1,15 @@
 """
-MediTutor AI — Streamlit Frontend
-Main entry point. Configures API URL and global session state.
+MediTutor AI — Streamlit Frontend (Production Ready)
+Main entry point with user isolation and persistent user_id.
 """
 
 import streamlit as st
 import os
+import uuid
+import requests
+import json
+from pathlib import Path
+
 # ── Page Config (MUST be first Streamlit call) ───────────────────────────────
 st.set_page_config(
     page_title="MediTutor AI",
@@ -13,23 +18,79 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-import os
-
+# ── Constants ─────────────────────────────────────────────────────────────────
 BASE_BACKEND = os.getenv(
     "BACKEND_URL",
     "https://meditutor-backend-v2.onrender.com"
 )
-
 API_URL = f"{BASE_BACKEND}/api/v1"
 
-import uuid
-# ── Session State Defaults ───────────────────────────────────────────────────
+# ─── User ID Management (Persistent) ─────────────────────────────────────────
+def get_or_create_user_id() -> str:
+    """
+    Get existing user_id from localStorage or create new one.
+    Persists across browser sessions using Streamlit's secrets.
+    """
+    # Try to get from session state first
+    if "user_id" in st.session_state and st.session_state.user_id:
+        return st.session_state.user_id
+    
+    # Try to load from file (persists across server restarts)
+    user_id_file = Path(".user_id")
+    if user_id_file.exists():
+        try:
+            with open(user_id_file, "r") as f:
+                user_id = f.read().strip()
+                if user_id and len(user_id) >= 32:
+                    st.session_state.user_id = user_id
+                    return user_id
+        except Exception:
+            pass
+    
+    # Generate new user_id
+    new_user_id = str(uuid.uuid4())
+    st.session_state.user_id = new_user_id
+    
+    # Save to file for persistence
+    try:
+        with open(user_id_file, "w") as f:
+            f.write(new_user_id)
+    except Exception:
+        pass
+    
+    return new_user_id
+
+
+def get_api_headers() -> dict:
+    """
+    Get headers for API requests including user authentication.
+    Call this for every backend request.
+    """
+    user_id = get_or_create_user_id()
+    return {
+        "X-User-ID": user_id,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+
+def get_upload_headers() -> dict:
+    """
+    Get headers for file upload requests (no Content-Type).
+    """
+    user_id = get_or_create_user_id()
+    return {
+        "X-User-ID": user_id,
+        "Accept": "application/json",
+    }
+
+
+# ─── Session State Defaults ──────────────────────────────────────────────────
 defaults = {
     "api_url": API_URL,
     "selected_doc_id": None,
     "selected_doc_name": None,
     "session_id": None,
-    "student_id": "default_student",
     "chat_history": [],
     "current_mcqs": [],
     "current_flashcards": [],
@@ -39,13 +100,14 @@ defaults = {
     "show_answer": False,
 }
 
-if "user_id" not in st.session_state:
-    st.session_state.user_id = str(uuid.uuid4())
+# Initialize user_id (persistent)
+user_id = get_or_create_user_id()
+
 for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ── Custom CSS ───────────────────────────────────────────────────────────────
+# ─── Custom CSS ───────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 /* Global font and background */
@@ -194,26 +256,47 @@ html, body, [class*="css"] {
 }
 .hero h1 { margin: 0; font-size: 2rem; }
 .hero p  { margin: 0.4rem 0 0; color: #a5b4fc; font-size: 1.05rem; }
+
+/* User badge */
+.user-badge {
+    background: #334155;
+    border-radius: 8px;
+    padding: 0.3rem 0.6rem;
+    font-size: 0.7rem;
+    font-family: monospace;
+    color: #94a3b8;
+    text-align: center;
+}
 </style>
 """, unsafe_allow_html=True)
 
-# ── Sidebar: Document Selector ────────────────────────────────────────────────
-import requests
-
+# ─── Sidebar: Document Selector ────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🧠 MediTutor AI")
+    
+    # Show user badge (for debugging/awareness)
+    st.markdown(
+        f'<div class="user-badge">👤 User: {user_id[:8]}...{user_id[-4:]}</div>',
+        unsafe_allow_html=True,
+    )
     st.markdown("---")
 
-    # Fetch documents
+    # Fetch documents with auth headers
     try:
-        resp = requests.get(f"{st.session_state.api_url}/pdf/list", timeout=5)
+        headers = get_api_headers()
+        resp = requests.get(
+            f"{st.session_state.api_url}/pdf/list",
+            headers=headers,
+            timeout=5
+        )
         if resp.ok:
             docs = resp.json().get("documents", [])
         else:
             docs = []
-    except Exception:
+            st.warning(f"Backend error: {resp.status_code}")
+    except Exception as e:
         docs = []
-        st.warning("⚠️ Backend offline")
+        st.warning(f"⚠️ Backend offline: {str(e)[:50]}")
 
     if docs:
         doc_options = {f"📄 {d['filename'][:30]}": d["id"] for d in docs}
@@ -239,22 +322,66 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("**Navigate**")
-    st.page_link("app.py",              label="🏠 Home",         )
-    st.page_link("pages/1_Upload.py",   label="📤 Upload PDF"   )
+    st.page_link("app.py",              label="🏠 Home")
+    st.page_link("pages/1_Upload.py",   label="📤 Upload PDF")
     st.page_link("pages/2_QA_Chat.py",  label="💬 Ask Questions")
-    st.page_link("pages/3_Flashcards.py", label="🃏 Flashcards" )
-    st.page_link("pages/4_MCQ_Quiz.py", label="📝 MCQ Quiz"     )
-    st.page_link("pages/5_Progress.py", label="📊 Progress"     )
+    st.page_link("pages/3_Flashcards.py", label="🃏 Flashcards")
+    st.page_link("pages/4_MCQ_Quiz.py", label="📝 MCQ Quiz")
+    st.page_link("pages/5_Progress.py", label="📊 Progress")
     st.page_link("pages/6_Prereq.py",   label="🔍 Prerequisites")
 
     st.markdown("---")
+    
+    # Optional: Clear user data button (GDPR)
+    if st.button("🗑️ Clear My Data", type="secondary", use_container_width=True):
+        try:
+            headers = get_api_headers()
+            resp = requests.delete(
+                f"{st.session_state.api_url.replace('/api/v1', '')}/api/v1/user/data",
+                headers=headers,
+                timeout=30
+            )
+            if resp.ok:
+                st.success("Your data has been deleted. Refresh to start fresh.")
+                # Clear local user_id file
+                user_id_file = Path(".user_id")
+                if user_id_file.exists():
+                    user_id_file.unlink()
+                st.session_state.clear()
+                st.rerun()
+            else:
+                st.error(f"Failed to delete data: {resp.status_code}")
+        except Exception as e:
+            st.error(f"Error: {e}")
+    
     st.markdown(
-        "<div style='font-size:0.75rem;color:#64748b;text-align:center;'>"
-        "MediTutor AI v1.0 • Free APIs</div>",
+        "<div style='font-size:0.75rem;color:#64748b;text-align:center;margin-top:1rem;'>"
+        "MediTutor AI v2.0 • User Isolated</div>",
         unsafe_allow_html=True,
     )
 
-# ── Home Page ─────────────────────────────────────────────────────────────────
+# ─── Start Study Session (if document selected and no session) ─────────────────
+if st.session_state.selected_doc_id and not st.session_state.get("session_id"):
+    try:
+        headers = get_api_headers()
+        payload = {
+            "document_id": st.session_state.selected_doc_id,
+            # No student_id needed — backend uses X-User-ID header
+        }
+        resp = requests.post(
+            f"{API_URL}/progress/session/start",
+            json=payload,
+            headers=headers,
+            timeout=5,
+        )
+        if resp.ok:
+            st.session_state["session_id"] = resp.json()["session_id"]
+        else:
+            st.warning("Could not start study session. Progress may not be tracked.")
+    except Exception as e:
+        st.warning(f"Session error: {str(e)[:50]}")
+
+# ─── Home Page ─────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="hero">
   <h1>🧠 MediTutor AI</h1>
@@ -302,18 +429,27 @@ st.markdown("### 🔌 System Status")
 c1, c2 = st.columns(2)
 with c1:
     try:
-        r = requests.get(f"{st.session_state.api_url.replace('/api/v1','')}/health", timeout=4)
+        headers = get_api_headers()
+        r = requests.get(
+            f"{st.session_state.api_url.replace('/api/v1', '')}/health",
+            headers=headers,
+            timeout=4
+        )
         if r.ok:
             data = r.json()
             st.success("✅ Backend connected")
-            models = data.get("models", {})
+            models = data.get("llm", {})
             groq_ok = models.get("groq", {}).get("configured", False)
             hf_ok = models.get("huggingface", {}).get("configured", False)
             st.markdown(f"**Groq API:** {'✅' if groq_ok else '❌ Not configured'}")
             st.markdown(f"**HuggingFace API:** {'✅' if hf_ok else '❌ Not configured'}")
+            
+            # Show auth status
+            auth = data.get("auth", {})
+            st.markdown(f"**Auth Mode:** {auth.get('mode', 'unknown')}")
         else:
             st.error("❌ Backend returned error")
-    except Exception:
-        st.error("❌ Backend not reachable — is it running?")
+    except Exception as e:
+        st.error(f"❌ Backend not reachable — is it running? ({str(e)[:50]})")
 with c2:
-    st.info(f"**API URL:** `{st.session_state.api_url}`\n\nChange via `MEDITUTOR_API_URL` env var.")
+    st.info(f"**API URL:** `{st.session_state.api_url}`\n\n**User ID:** `{user_id[:8]}...{user_id[-4:]}`")

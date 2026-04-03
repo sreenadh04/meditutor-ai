@@ -1,14 +1,17 @@
 """
-MediTutor AI — Page 5: Progress Dashboard
+MediTutor AI — Page 5: Progress Dashboard with User Isolation
 """
 
 import streamlit as st
 import requests
 import os
+import sys
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 st.set_page_config(page_title="Progress — MediTutor AI", page_icon="📊", layout="wide")
-
-
 
 BASE_BACKEND = os.getenv(
     "BACKEND_URL",
@@ -17,8 +20,55 @@ BASE_BACKEND = os.getenv(
 
 API_URL = f"{BASE_BACKEND}/api/v1"
 
+
+# ─── Helper functions ─────────────────────────────────────────────────────────
+def get_or_create_user_id() -> str:
+    """Get existing user_id or create new one."""
+    if "user_id" in st.session_state and st.session_state.user_id:
+        return st.session_state.user_id
+    
+    user_id_file = Path(".user_id")
+    if user_id_file.exists():
+        try:
+            with open(user_id_file, "r") as f:
+                user_id = f.read().strip()
+                if user_id and len(user_id) >= 32:
+                    st.session_state.user_id = user_id
+                    return user_id
+        except Exception:
+            pass
+    
+    import uuid
+    new_user_id = str(uuid.uuid4())
+    st.session_state.user_id = new_user_id
+    try:
+        with open(user_id_file, "w") as f:
+            f.write(new_user_id)
+    except Exception:
+        pass
+    
+    return new_user_id
+
+
+def get_api_headers() -> dict:
+    """Get headers for API requests."""
+    user_id = get_or_create_user_id()
+    return {
+        "X-User-ID": user_id,
+        "Accept": "application/json",
+    }
+
+
+# Ensure user_id exists
+get_or_create_user_id()
+
 st.title("📊 Progress Dashboard")
 st.caption("Track your performance, spot weak areas, and measure improvement over time.")
+
+# Show user context
+user_id = get_or_create_user_id()
+st.markdown(f"👤 **Your progress data** — User ID: `{user_id[:8]}...{user_id[-4:]}`")
+st.markdown("---")
 
 doc_id = st.session_state.get("selected_doc_id")
 doc_name = st.session_state.get("selected_doc_name", "")
@@ -28,34 +78,44 @@ if not doc_id:
 
 st.info(f"📄 Document: **{doc_name}**")
 
-# ── Fetch Progress ────────────────────────────────────────────────────────────
+# ─── Fetch Progress with User Headers ─────────────────────────────────────────
 try:
+    headers = get_api_headers()
+    # No student_id param needed — backend uses X-User-ID header
     resp = requests.get(
         f"{API_URL}/progress/{doc_id}",
-        params={"student_id": "default_student"},
+        headers=headers,
         timeout=10,
     )
+    
     if resp.status_code == 200:
         prog = resp.json()
+    elif resp.status_code == 401:
+        st.error("❌ Authentication error. Please refresh the page.")
+        st.stop()
     elif resp.status_code == 404:
         st.error("Document not found.")
         st.stop()
     else:
-        st.error(f"Failed to load progress: {resp.text}")
+        st.error(f"Failed to load progress: {resp.text[:200]}")
         st.stop()
+        
+except requests.exceptions.ConnectionError:
+    st.error("❌ Cannot connect to backend. Is it running?")
+    st.stop()
 except Exception as e:
     st.error(f"Backend error: {e}")
     st.stop()
 
-# ── Overview Metrics ──────────────────────────────────────────────────────────
+# ─── Overview Metrics ──────────────────────────────────────────────────────────
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("📝 Total Attempts",  prog["total_attempts"])
-c2.metric("✅ Correct",         prog["total_correct"])
-c3.metric("🎯 Accuracy",        f"{prog['overall_accuracy']:.1f}%")
-c4.metric("⚠️ Weak Topics",     len(prog["weak_topics"]))
+c1.metric("📝 Total Attempts",  prog.get("total_attempts", 0))
+c2.metric("✅ Correct",         prog.get("total_correct", 0))
+c3.metric("🎯 Accuracy",        f"{prog.get('overall_accuracy', 0):.1f}%")
+c4.metric("⚠️ Weak Topics",     len(prog.get("weak_topics", [])))
 
-# ── Accuracy Bar ─────────────────────────────────────────────────────────────
-acc = prog["overall_accuracy"]
+# ─── Accuracy Bar ─────────────────────────────────────────────────────────────
+acc = prog.get("overall_accuracy", 0)
 bar_color = "#22c55e" if acc >= 70 else "#f59e0b" if acc >= 50 else "#ef4444"
 st.markdown(f"""
 <div style="margin: 1rem 0;">
@@ -70,13 +130,14 @@ st.markdown(f"""
 
 st.divider()
 
-# ── Weak & Strong Topics ──────────────────────────────────────────────────────
+# ─── Weak & Strong Topics ──────────────────────────────────────────────────────
 col_weak, col_strong = st.columns(2)
 
 with col_weak:
     st.subheader("⚠️ Weak Topics (< 60%)")
-    if prog["weak_topics"]:
-        for t in prog["weak_topics"]:
+    weak_topics = prog.get("weak_topics", [])
+    if weak_topics:
+        for t in weak_topics:
             st.markdown(
                 f'<span style="display:inline-block;background:#fee2e2;color:#b91c1c;'
                 f'border-radius:6px;padding:4px 10px;margin:3px;font-size:0.85rem;">🔴 {t}</span>',
@@ -88,8 +149,9 @@ with col_weak:
 
 with col_strong:
     st.subheader("🏆 Strong Topics (≥ 80%)")
-    if prog["strong_topics"]:
-        for t in prog["strong_topics"]:
+    strong_topics = prog.get("strong_topics", [])
+    if strong_topics:
+        for t in strong_topics:
             st.markdown(
                 f'<span style="display:inline-block;background:#dcfce7;color:#166534;'
                 f'border-radius:6px;padding:4px 10px;margin:3px;font-size:0.85rem;">🟢 {t}</span>',
@@ -100,7 +162,7 @@ with col_strong:
 
 st.divider()
 
-# ── Topic Breakdown Table ─────────────────────────────────────────────────────
+# ─── Topic Breakdown Table ─────────────────────────────────────────────────────
 st.subheader("📋 Topic-by-Topic Breakdown")
 
 topics = prog.get("topics", [])
@@ -131,40 +193,63 @@ else:
 
 st.divider()
 
-# ── Recent Sessions ───────────────────────────────────────────────────────────
+# ─── Recent Sessions ───────────────────────────────────────────────────────────
 st.subheader("🕐 Recent Study Sessions")
 
 sessions = prog.get("recent_sessions", [])
 if sessions:
     for s in sessions:
-        started = s["started_at"][:16].replace("T", " ")
-        acc_s = s["accuracy"]
+        started = s.get("started_at", "")[:16].replace("T", " ") if s.get("started_at") else "Unknown"
+        acc_s = s.get("accuracy", 0)
         acc_color = "#22c55e" if acc_s >= 70 else "#f59e0b" if acc_s >= 50 else "#ef4444"
         with st.container():
             sc1, sc2, sc3, sc4 = st.columns([2, 1, 1, 1])
             sc1.markdown(f"🕐 `{started}`")
-            sc2.markdown(f"**{s['total_questions']}** Qs")
-            sc3.markdown(f"**{s['correct']}** ✅")
+            sc2.markdown(f"**{s.get('total_questions', 0)}** Qs")
+            sc3.markdown(f"**{s.get('correct', 0)}** ✅")
             sc4.markdown(f'<span style="color:{acc_color};font-weight:700;">{acc_s:.1f}%</span>', unsafe_allow_html=True)
         st.markdown("<hr style='margin:0.3rem 0;border-color:#f1f5f9;'>", unsafe_allow_html=True)
 else:
     st.info("No study sessions yet. Take a quiz or review flashcards to track your progress.")
 
-# ── Recommendations ───────────────────────────────────────────────────────────
-if prog["weak_topics"] or prog["total_attempts"] == 0:
+# ─── Recommendations ───────────────────────────────────────────────────────────
+weak_topics = prog.get("weak_topics", [])
+total_attempts = prog.get("total_attempts", 0)
+
+if weak_topics or total_attempts == 0:
     st.divider()
     st.subheader("💡 Study Recommendations")
     
-    if prog["total_attempts"] == 0:
+    if total_attempts == 0:
         st.info("Start by taking a **📝 MCQ Quiz** or reviewing **🃏 Flashcards** to populate your progress data.")
     else:
         recs = []
-        if prog["weak_topics"]:
-            recs.append(f"🔴 Revise these weak topics: **{', '.join(prog['weak_topics'][:3])}**")
-        if prog["overall_accuracy"] < 60:
+        if weak_topics:
+            recs.append(f"🔴 Revise these weak topics: **{', '.join(weak_topics[:3])}**")
+        if prog.get("overall_accuracy", 0) < 60:
             recs.append("📖 Re-read the relevant chapters before attempting more quizzes.")
-        if prog["total_attempts"] < 20:
+        if total_attempts < 20:
             recs.append("📝 Attempt more MCQs to build a solid performance baseline.")
         
         for rec in recs:
             st.markdown(f"- {rec}")
+
+# ─── User Stats Summary ───────────────────────────────────────────────────────
+with st.expander("📊 Your Overall Stats (All Documents)"):
+    try:
+        headers = get_api_headers()
+        resp = requests.get(
+            f"{API_URL.replace('/api/v1', '')}/api/v1/user/stats",
+            headers=headers,
+            timeout=5
+        )
+        if resp.status_code == 200:
+            stats = resp.json()
+            col1, col2, col3 = st.columns(3)
+            col1.metric("📄 Documents", stats.get("documents", {}).get("count", 0))
+            col2.metric("💾 Cache Size", f"{stats.get('cache', {}).get('total_items', 0)} items")
+            col3.metric("📁 Storage", stats.get("storage_path", "N/A")[:30] + "...")
+        else:
+            st.info("Login to see your overall stats")
+    except Exception:
+        st.info("Login to see your overall stats")

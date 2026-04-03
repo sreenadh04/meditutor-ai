@@ -1,14 +1,17 @@
 """
-MediTutor AI — Page 4: MCQ Quiz
+MediTutor AI — Page 4: MCQ Quiz with User Isolation
 """
 
 import streamlit as st
 import requests
 import os
+import sys
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 st.set_page_config(page_title="MCQ Quiz — MediTutor AI", page_icon="📝", layout="wide")
-
-import os
 
 BASE_BACKEND = os.getenv(
     "BACKEND_URL",
@@ -16,6 +19,49 @@ BASE_BACKEND = os.getenv(
 )
 
 API_URL = f"{BASE_BACKEND}/api/v1"
+
+
+# ─── Helper functions ─────────────────────────────────────────────────────────
+def get_or_create_user_id() -> str:
+    """Get existing user_id or create new one."""
+    if "user_id" in st.session_state and st.session_state.user_id:
+        return st.session_state.user_id
+    
+    user_id_file = Path(".user_id")
+    if user_id_file.exists():
+        try:
+            with open(user_id_file, "r") as f:
+                user_id = f.read().strip()
+                if user_id and len(user_id) >= 32:
+                    st.session_state.user_id = user_id
+                    return user_id
+        except Exception:
+            pass
+    
+    import uuid
+    new_user_id = str(uuid.uuid4())
+    st.session_state.user_id = new_user_id
+    try:
+        with open(user_id_file, "w") as f:
+            f.write(new_user_id)
+    except Exception:
+        pass
+    
+    return new_user_id
+
+
+def get_api_headers() -> dict:
+    """Get headers for API requests."""
+    user_id = get_or_create_user_id()
+    return {
+        "X-User-ID": user_id,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+
+# Ensure user_id exists
+get_or_create_user_id()
 
 st.markdown("""
 <style>
@@ -25,11 +71,17 @@ st.markdown("""
 .option-wrong    { background:#fff1f2; border:2px solid #ef4444; border-radius:8px; padding:0.7rem 1rem; margin:0.3rem 0; }
 .explanation-box { background:#fffbeb; border-left:4px solid #f59e0b; padding:0.8rem 1rem; border-radius:0 8px 8px 0; margin-top:0.5rem; font-size:0.9rem; }
 .score-big { font-size:3rem; font-weight:800; text-align:center; }
+.user-badge { background: #e2e8f0; border-radius: 6px; padding: 0.2rem 0.5rem; font-size: 0.7rem; font-family: monospace; display: inline-block; }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("📝 MCQ Quiz")
 st.caption("Test your knowledge with AI-generated multiple-choice questions.")
+
+# Show user context
+user_id = get_or_create_user_id()
+st.markdown(f'<span class="user-badge">👤 User: {user_id[:8]}...{user_id[-4:]}</span>', unsafe_allow_html=True)
+st.markdown("---")
 
 doc_id = st.session_state.get("selected_doc_id")
 doc_name = st.session_state.get("selected_doc_name", "")
@@ -39,20 +91,28 @@ if not doc_id:
 
 st.info(f"📄 Document: **{doc_name}**")
 
-# ── Ensure session ────────────────────────────────────────────────────────────
+# ─── Ensure session with headers ────────────────────────────────────────────────
 if not st.session_state.get("session_id"):
     try:
+        headers = get_api_headers()
+        # No student_id in body — backend uses X-User-ID header
+        payload = {"document_id": doc_id}
         r = requests.post(
             f"{API_URL}/progress/session/start",
-            json={"document_id": doc_id, "student_id": "default_student"},
+            json=payload,
+            headers=headers,
             timeout=5,
         )
-        if r.ok:
+        if r.status_code == 200:
             st.session_state["session_id"] = r.json()["session_id"]
-    except Exception:
-        pass
+        elif r.status_code == 401:
+            st.error("❌ Authentication error. Please refresh the page.")
+        else:
+            st.warning("Could not start study session. Progress may not be tracked.")
+    except Exception as e:
+        st.warning(f"Session error: {str(e)[:50]}")
 
-# ── Generation Controls ───────────────────────────────────────────────────────
+# ─── Generation Controls ───────────────────────────────────────────────────────
 if not st.session_state.get("current_mcqs") or st.session_state.get("quiz_submitted"):
     with st.expander("⚙️ Quiz Settings", expanded=True):
         col1, col2 = st.columns(2)
@@ -64,12 +124,18 @@ if not st.session_state.get("current_mcqs") or st.session_state.get("quiz_submit
         if st.button("🎯 Generate Quiz", type="primary", use_container_width=True):
             with st.spinner("🤖 Creating quiz questions..."):
                 try:
+                    headers = get_api_headers()
                     payload = {
                         "document_id": doc_id,
                         "count": count,
                         "topic": topic.strip() if topic.strip() else None,
                     }
-                    resp = requests.post(f"{API_URL}/mcq/generate", json=payload, timeout=120)
+                    resp = requests.post(
+                        f"{API_URL}/mcq/generate",
+                        json=payload,
+                        headers=headers,
+                        timeout=120
+                    )
 
                     if resp.status_code == 200:
                         data = resp.json()
@@ -80,6 +146,8 @@ if not st.session_state.get("current_mcqs") or st.session_state.get("quiz_submit
                         model = data.get("model_used", "")
                         st.success(f"✅ {data['total_generated']} questions ready! — `{model}`")
                         st.rerun()
+                    elif resp.status_code == 401:
+                        st.error("❌ Authentication error. Please refresh the page.")
                     else:
                         st.error(f"❌ {resp.json().get('detail', 'Failed')}")
                 except requests.exceptions.Timeout:
@@ -87,7 +155,7 @@ if not st.session_state.get("current_mcqs") or st.session_state.get("quiz_submit
                 except Exception as e:
                     st.error(f"❌ {e}")
 
-# ── Quiz Interface ────────────────────────────────────────────────────────────
+# ─── Quiz Interface ────────────────────────────────────────────────────────────
 questions = st.session_state.get("current_mcqs", [])
 submitted = st.session_state.get("quiz_submitted", False)
 results_data = st.session_state.get("quiz_results")
@@ -205,6 +273,7 @@ if questions:
         ):
             with st.spinner("Grading your answers..."):
                 try:
+                    headers = get_api_headers()
                     answers_payload = [
                         {
                             "question_id": qid,
@@ -220,8 +289,14 @@ if questions:
                         "answers": answers_payload,
                     }
                     
-                    resp = requests.post(f"{API_URL}/mcq/submit", json=submit_payload, timeout=30)
-                    if resp.ok:
+                    resp = requests.post(
+                        f"{API_URL}/mcq/submit",
+                        json=submit_payload,
+                        headers=headers,
+                        timeout=30
+                    )
+                    
+                    if resp.status_code == 200:
                         result = resp.json()
                         # Attach question_id to feedback
                         for fb, ans in zip(result["feedback"], answers_payload):
@@ -229,7 +304,9 @@ if questions:
                         st.session_state["quiz_results"] = result
                         st.session_state["quiz_submitted"] = True
                         st.rerun()
+                    elif resp.status_code == 401:
+                        st.error("❌ Authentication error. Please refresh the page.")
                     else:
-                        st.error(f"Submission failed: {resp.json().get('detail')}")
+                        st.error(f"Submission failed: {resp.json().get('detail', 'Unknown error')}")
                 except Exception as e:
                     st.error(f"Error: {e}")

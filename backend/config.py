@@ -78,7 +78,7 @@ DATABASE_URL = f"sqlite:///{DB_DIR}/meditutor.db"
 # ─── CORS ─────────────────────────────────────────────────────────────────────
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
-    "http://localhost:8501,http://localhost:3000"
+    "https://meditutor-frontend.onrender.com",
 ).split(",")
 
 # ─── App Settings ─────────────────────────────────────────────────────────────
